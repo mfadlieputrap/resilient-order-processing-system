@@ -1,0 +1,27 @@
+# Git
+.git
+.gitignore
+
+# Node (WAJIB recursive)
+node_modules
+**/node_modules
+
+# Build output
+dist
+**/dist
+coverage
+**/coverage
+
+# Env & compose
+.env
+docker-compose.yml
+
+# Logs & cache
+npm-debug.log
+**/*.log
+.cache
+.tmp
+
+# OS
+.DS_Store
+Thumbs.db

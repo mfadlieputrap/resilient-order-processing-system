@@ -1,0 +1,235 @@
+# docker-compose.yml
+services:
+  # 1. Zookeeper Service
+  # Kafka memerlukan Zookeeper untuk mengelola state cluster.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - marketplace_kafka
+
+  # 2. Kafka Broker Service
+  # Ini adalah message broker utama.
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKAJS_NO_PARTITIONER_WARNING: 1
+    healthcheck:
+      test: ["CMD-SHELL", "cub kafka-ready -b kafka:29092 1 10 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - marketplace_kafka
+
+
+  # 3. Init Kafka Service
+  # Container ini hanya berjalan sekali untuk membuat SEMUA topik yang dibutuhkan.
+  # Ini adalah tempat sentral untuk manajemen topik saat startup.
+  init-kafka:
+    image: node:18
+    container_name: init-kafka
+    depends_on:
+      - kafka
+    volumes:
+      - ./init-kafka:/app
+    working_dir: /app
+    command: ["node", "init.js"]
+
+
+  # 4. MySQL Database Service
+  # Database yang akan digunakan oleh service 'auth'.
+  db:
+    image: mysql:8.0
+    container_name: mysql-db
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - marketplace_kafka
+
+
+  # 5. Auth Application Service
+  # Service NestJS Anda, sekarang berjalan di dalam Docker.
+  auth:
+    build:
+      context: . # Build context adalah root direktori proyek
+      dockerfile: apps/auth/Dockerfile # Path menuju Dockerfile
+    container_name: auth-app
+    ports:
+      - "3001:3001"
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASS: root
+      DB_DATABASE: auth_db
+      JWT_SECRET: your-super-secret-jwt-key
+      port: 3001
+      KAFKA_BROKERS: kafka:29092 # BENAR: Menunjuk ke listener INTERNAL Kafka
+    networks:
+      - marketplace_kafka
+  
+  user:
+    build:
+      context: .
+      dockerfile: apps/user/Dockerfile
+    container_name: user-app
+    ports:
+      - "3002:3002"
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASS: root
+      DB_DATABASE: user_db
+      port: 3002
+      KAFKA_BROKERS: kafka:29092
+    networks:
+      - marketplace_kafka
+
+  product:
+    build:
+      context: .
+      dockerfile: apps/product/Dockerfile
+    container_name: product-app
+    ports:
+      - "3003:3003"
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASS: root
+      DB_DATABASE: product_db
+      port: 3003
+      KAFKA_BROKERS: kafka:29092
+    networks:
+      - marketplace_kafka
+  
+  order:
+    build:
+      context: .
+      dockerfile: apps/order/Dockerfile
+    container_name: order-app
+    ports:
+      - "3004:3004"
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASS: root
+      DB_DATABASE: order_db
+      port: 3004
+      KAFKA_BROKERS: kafka:29092
+    networks:
+      - marketplace_kafka
+
+  audit:
+    build:
+      context: .
+      dockerfile: apps/audit/Dockerfile
+    container_name: audit-app
+    ports:
+      - "3005:3005"
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASS: root
+      DB_DATABASE: audit_db
+      port: 3005
+      KAFKA_BROKERS: kafka:29092
+    networks:
+      - marketplace_kafka
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: apps/api-gateway/Dockerfile
+    container_name: api-gateway
+    ports:
+      - "3000:3000"
+    depends_on:
+      auth:
+        condition: service_started
+      user:
+        condition: service_started
+      product:
+        condition: service_started
+      order:
+        condition: service_started
+      audit:
+        condition: service_started
+    environment:
+      AUTH_SERVICE_URL: http://auth:3001
+      USER_SERVICE_URL: http://user:3002
+      PRODUCT_SERVICE_URL: http://product:3003
+      ORDER_SERVICE_URL: http://order:3004
+      AUDIT_SERVICE_URL: http://audit:3005
+      port: 3000
+    networks:
+      - marketplace_kafka
+
+
+# Mendefinisikan volume yang akan digunakan
+volumes:
+  mysql-data:
+
+networks:
+  marketplace_kafka:
+    driver: bridge
